@@ -4,95 +4,109 @@ import pandas as pd
 import datetime
 
 # 1. 網頁基本設定
-st.set_page_config(page_title="雲端進階記帳結算系統", layout="centered")
+st.set_page_config(page_title="雲端進階記帳結算系統", layout="wide")
 st.title("💰 雲端進階記帳結算系統")
 
 # 2. 連接 Google Sheets
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# 讀取資料函數 (增加清除快取功能)
-def get_data():
+# --- 核心修正：強制重新整理資料 ---
+def load_data():
+    # ttl=0 確保不使用舊快取，每次都抓最新的雲端資料
     try:
-        # ttl=0 確保每次都從雲端抓最新，不讀取舊快取
-        return conn.read(worksheet="Log", ttl=0)
+        data = conn.read(worksheet="Log", ttl=0)
+        # 清除可能產生的全空行
+        data = data.dropna(how='all')
+        return data
     except:
         return pd.DataFrame(columns=["日期", "付款人", "總金額", "分攤明細"])
 
-df = get_data()
+df = load_data()
 
 # 3. 初始化成員清單
 if 'members' not in st.session_state:
     st.session_state.members = ["weiche", "Michael", "Ivy", "Wendy", "Ben", "Xuan", "Kaiwen", "Daniel"]
 
-with st.expander("👥 成員設定"):
-    member_str = st.text_input("輸入成員名稱 (用半角逗號隔開)", value=", ".join(st.session_state.members))
-    if st.button("更新成員"):
+with st.sidebar:
+    st.subheader("👥 成員設定")
+    member_str = st.text_input("輸入成員名稱 (用逗號隔開)", value=", ".join(st.session_state.members))
+    if st.button("更新成員清單"):
         st.session_state.members = [m.strip() for m in member_str.split(",") if m.strip()]
         st.rerun()
 
 members = st.session_state.members
 
 # 4. 新增支出功能
-st.subheader("➕ 新增支出 (同步雲端)")
+st.subheader("➕ 新增支出 (將即時同步雲端)")
 with st.form("expense_form", clear_on_submit=True):
-    payer = st.selectbox("誰付的錢？", members)
-    total_amount = st.number_input("支出總金額", min_value=0.0, step=10.0)
+    col_a, col_b = st.columns(2)
+    with col_a:
+        payer = st.selectbox("誰付的錢？", members)
+    with col_b:
+        total_amount = st.number_input("支出總金額", min_value=0.0, step=10.0)
     
     st.write("每人分攤金額 (留空則代表平分):")
     shares_input = {}
-    cols = st.columns(2)
+    cols = st.columns(4)
     for i, m in enumerate(members):
-        shares_input[m] = cols[i % 2].text_input(f"{m} 的分攤", key=f"input_{m}")
+        shares_input[m] = cols[i % 4].text_input(f"{m}", key=f"input_{m}")
     
-    submit_button = st.form_submit_button("送出紀錄並同步")
+    submit_button = st.form_submit_button("✅ 確認提交並同步雲端")
     
     if submit_button:
-        # 計算分攤
-        final_shares = {}
-        manual_entries = {m: float(val) for m, val in shares_input.items() if val.strip()}
-        
-        if not manual_entries:
-            avg = total_amount / len(members)
-            final_shares = {m: round(avg, 2) for m in members}
+        if total_amount <= 0:
+            st.error("請輸入大於 0 的金額")
         else:
-            final_shares = {m: manual_entries.get(m, 0.0) for m in members}
+            # --- 處理分攤邏輯 ---
+            final_shares = {}
+            manual_entries = {m: float(val) for m, val in shares_input.items() if val.strip()}
+            
+            if not manual_entries:
+                avg = total_amount / len(members)
+                final_shares = {m: round(avg, 2) for m in members}
+            else:
+                final_shares = {m: manual_entries.get(m, 0.0) for m in members}
 
-        # 寫入雲端
-        new_data = pd.DataFrame([{
-            "日期": datetime.date.today().strftime("%Y-%m-%d"),
-            "付款人": payer,
-            "總金額": total_amount,
-            "分攤明細": str(final_shares)
-        }])
-        
-        updated_df = pd.concat([df, new_data], ignore_index=True)
-        conn.update(worksheet="Log", data=updated_df)
-        st.success("✅ 已寫入雲端！")
-        st.rerun()
+            # --- 關鍵修正：先讀取最新資料再合併，避免覆蓋 ---
+            current_df = load_data()
+            new_row = pd.DataFrame([{
+                "日期": datetime.date.today().strftime("%Y-%m-%d"),
+                "付款人": payer,
+                "總金額": total_amount,
+                "分攤明細": str(final_shares)
+            }])
+            
+            updated_df = pd.concat([current_df, new_row], ignore_index=True)
+            
+            # 寫入雲端
+            conn.update(worksheet="Log", data=updated_df)
+            st.success("🎉 資料已成功新增，並保留舊紀錄！")
+            st.rerun()
 
-# 5. 結算報告 (統計與誰付多少)
+# 5. 結算報告
 st.divider()
-st.subheader("📊 目前收支統計表")
+st.subheader("📊 目前收支統計狀態")
 
-# 核心修正：強健解析資料
+# --- 偵錯工具：如果你看不到表格，請取消下面這行的註解來檢查 ---
+# st.write("雲端原始資料：", df)
+
 if not df.empty:
     paid_summary = {m: 0.0 for m in members}
     spent_summary = {m: 0.0 for m in members}
     
-    # 遍歷每一行資料進行累加
+    # 強制確保 DataFrame 欄位名稱正確
+    df.columns = [c.strip() for c in df.columns]
+
     for _, row in df.iterrows():
-        # 取得付款人 (使用 get 避免欄位名稱微小差異導致報錯)
-        p = row.get("付款人")
+        # 付款人累計
+        p = str(row.get("付款人", "")).strip()
         amt = row.get("總金額", 0)
-        detail_str = row.get("分攤明細", "{}")
-        
-        # 累加付款金額
         if p in paid_summary:
             paid_summary[p] += float(amt)
             
-        # 累加個人消費金額
+        # 消費金額累計
         try:
-            # 將字串格式的字典轉回真正的字典
+            detail_str = row.get("分攤明細", "{}")
             detail = eval(str(detail_str))
             for m, s in detail.items():
                 if m in spent_summary:
@@ -100,39 +114,37 @@ if not df.empty:
         except:
             continue
 
-    # 建立統計表格
-    status_list = []
+    # 顯示統計表
+    status_data = []
     for m in members:
-        # 淨結餘 = 自己吃掉的錢 - 自己代墊的錢
-        # 正數：代表欠人錢 (應付)；負數：代表別人欠你錢 (應收)
-        balance = spent_summary[m] - paid_summary[m]
-        status_list.append({
+        # 淨額 = 自己吃掉的 - 自己墊的
+        # 正數 = 欠別人的；負數 = 別人欠你的
+        net = spent_summary[m] - paid_summary[m]
+        status_data.append({
             "成員": m,
-            "總代墊 (付出的)": round(paid_summary[m], 2),
-            "個人總花費": round(spent_summary[m], 2),
-            "狀態": f"欠 ${round(balance, 2)}" if balance > 0.1 else (f"應收 ${round(abs(balance), 2)}" if balance < -0.1 else "已平帳"),
-            "raw_balance": balance
+            "總代墊 (付出的錢)": f"${paid_summary[m]:,.2f}",
+            "個人總花費": f"${spent_summary[m]:,.2f}",
+            "目前的餘額狀態": f"🔴 欠 ${net:,.2f}" if net > 0.1 else (f"🟢 應收 ${abs(net):,.2f}" if net < -0.1 else "⚪ 已清平"),
+            "raw_net": net
         })
     
-    display_df = pd.DataFrame(status_list)
-    st.table(display_df.drop(columns=["raw_balance"]))
+    st.table(pd.DataFrame(status_data).drop(columns=["raw_net"]))
 
-    # 6. 最簡轉帳建議 (這就是你要的「誰要付多少」)
-    st.subheader("💸 最簡轉帳建議")
-    if st.button("計算結算方案"):
-        debtors = sorted([[d["成員"], d["raw_balance"]] for d in status_list if d["raw_balance"] > 0.1], key=lambda x: x[1], reverse=True)
-        creditors = sorted([[d["成員"], abs(d["raw_balance"])] for d in status_list if d["raw_balance"] < -0.1], key=lambda x: x[1], reverse=True)
+    # 6. 計算誰給誰多少錢
+    if st.button("🔍 生成最簡轉帳建議"):
+        debtors = sorted([[m, spent_summary[m] - paid_summary[m]] for m in members if (spent_summary[m] - paid_summary[m]) > 0.1], key=lambda x: x[1], reverse=True)
+        creditors = sorted([[m, abs(spent_summary[m] - paid_summary[m])] for m in members if (spent_summary[m] - paid_summary[m]) < -0.1], key=lambda x: x[1], reverse=True)
         
-        if not debtors and not creditors:
-            st.write("目前大家都不互相欠錢囉！")
+        if not debtors:
+            st.write("✅ 目前帳目完全平衡，不需要轉帳！")
         else:
             i, j = 0, 0
             while i < len(debtors) and j < len(creditors):
-                transfer = min(debtors[i][1], creditors[j][1])
-                st.info(f"👉 **{debtors[i][0]}** 應支付給 **{creditors[j][0]}**： `${round(transfer, 2)}`")
-                debtors[i][1] -= transfer
-                creditors[j][1] -= transfer
+                amt = min(debtors[i][1], creditors[j][1])
+                st.info(f"💸 **{debtors[i][0]}** ➜ 給 **{creditors[j][0]}**： `${amt:,.2f}`")
+                debtors[i][1] -= amt
+                creditors[j][1] -= amt
                 if debtors[i][1] < 0.1: i += 1
                 if creditors[j][1] < 0.1: j += 1
 else:
-    st.info("目前雲端尚無紀錄。")
+    st.info("💡 雲端目前沒有任何記帳紀錄。")
