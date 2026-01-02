@@ -134,24 +134,28 @@ else:
                 if creditors[j][1] < 0.01: j += 1
 
     # 區塊 D：歷史紀錄與 CSV 下載 (修正後的代碼)
-    with st.expander("📜 歷史明細與結算報表下載"):
-        st.dataframe(history_df, use_container_width=True)
-        
-        # 修正 TypeError：使用 StringIO 處理文字流
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(["成員個人統計"])
-        writer.writerow(["姓名", "總共代墊金額", "個人消費總額", "最終差額(負數為應收)"])
-        for m in members:
-            writer.writerow([m, total_paid[m], total_spent[m], balances[m]])
-        
-        # 下載時加入 utf-8-sig 以確保 Excel 中文不亂碼
-        st.download_button(
-            label="📥 下載結算報表 (CSV)",
-            data=output.getvalue().encode('utf-8-sig'), 
-            file_name="expense_report.csv",
-            mime="text/csv"
-        )
+# --- 歷史明細與 CSV 匯出 (修正 TypeError 版) ---
+with st.expander("📜 歷史明細與下載"):
+    st.dataframe(history_df)
+    
+    # 關鍵修正點：使用 io.StringIO 而不是 BytesIO
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    # 寫入標題與資料
+    writer.writerow(["成員個人統計"])
+    writer.writerow(["姓名", "總共代墊金額", "個人消費總額", "最終差額(負數為應收)"])
+    
+    for m in members:
+        writer.writerow([m, total_paid[m], total_spent[m], balances[m]])
+    
+    # 下載時轉換成 bytes 並加上 utf-8-sig 解決 Excel 亂碼
+    st.download_button(
+        label="📥 下載結算報表 (CSV)",
+        data=output.getvalue().encode('utf-8-sig'), 
+        file_name="expense_report.csv",
+        mime="text/csv"
+    )
 
 # 區塊 E：側邊欄重置
 if st.sidebar.button("⚠️ 危險：清空雲端並重設系統"):
