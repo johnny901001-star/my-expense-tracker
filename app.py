@@ -7,7 +7,7 @@ import ast
 # 1. 網頁基本設定
 st.set_page_config(page_title="雲端進階記帳系統 V4", layout="wide")
 
-# 自定義 CSS：優化輸入框高度與對齊
+# 自定義 CSS
 st.markdown("""
     <style>
     .stCheckbox { margin-top: 15px; }
@@ -45,9 +45,11 @@ with st.sidebar:
         st.session_state.members = [m.strip() for m in member_str.split(",") if m.strip()]
         st.rerun()
 
-# 4. 新增支出功能 (改進排版與邏輯)
+# 4. 新增支出功能 (已加入自動清空功能)
 st.subheader("➕ 新增支出")
-with st.form("expense_form"):
+
+# 修改點 1：加入 clear_on_submit=True
+with st.form("expense_form", clear_on_submit=True):
     col_item, col_payer, col_amt = st.columns([2, 1, 1])
     with col_item:
         item_name = st.text_input("品名", placeholder="例如：晚餐、機票...")
@@ -58,16 +60,13 @@ with st.form("expense_form"):
     
     st.write("📝 **分攤設定** (勾選=參與平分 / 填寫數字=指定金額)")
     
-    # 建立分攤輸入區 (左右排版)
     check_states = {}
     manual_values = {}
     
-    # 每行顯示兩個成員，以維持左右排版的空間
     outer_cols = st.columns(2)
     for i, m in enumerate(members):
         with outer_cols[i % 2]:
             st.markdown(f"**👤 {m}**")
-            # 這裡使用內部 columns 達成一左一右
             c1, c2 = st.columns([1, 2])
             with c1:
                 check_states[m] = st.checkbox("平分", key=f"check_{m}")
@@ -83,7 +82,7 @@ with st.form("expense_form"):
         manual_members = []
         split_members = [m for m, checked in check_states.items() if checked]
         
-        # 1. 處理手動輸入
+        # 處理手動輸入
         for m, val in manual_values.items():
             if val.strip():
                 try:
@@ -95,7 +94,7 @@ with st.form("expense_form"):
                     st.error(f"❌ {m} 的金額格式錯誤")
                     st.stop()
 
-        # 2. 處理平分
+        # 處理平分
         remaining_amt = total_amount - total_manual
         if not split_members and not manual_members:
             avg = total_amount / len(members)
@@ -108,13 +107,14 @@ with st.form("expense_form"):
             for m in split_members:
                 final_shares[m] += round(avg, 2)
         
-        # 3. 驗證總額
+        # 驗證總額
         sum_shares = sum(final_shares.values())
         if abs(sum_shares - total_amount) > 0.5:
             st.error(f"❌ 分攤金額總計 (${sum_shares:.2f}) 與支出 (${total_amount:.2f}) 不符！")
         elif not item_name:
             st.error("❌ 請輸入品名")
         else:
+            # 寫入雲端
             fresh_df = load_full_data()
             new_row = pd.DataFrame([{
                 "日期": datetime.date.today().strftime("%Y-%m-%d"),
@@ -125,22 +125,22 @@ with st.form("expense_form"):
             }])
             updated_df = pd.concat([fresh_df, new_row], ignore_index=True)
             conn.update(worksheet="Log", data=updated_df)
+            
             st.success(f"🎉 儲存成功！")
+            # 修改點 2：執行完畢後立即重啟，強制重置所有 widget 狀態與重新讀取數據
             st.rerun()
 
-# 5. 📜 支出明細與詳細分攤 (新增功能)
+# 5. 📜 支出明細與詳細分攤
 st.divider()
 st.subheader("📜 支出詳細清單")
 if not df.empty:
     def format_detail(detail_str):
         try:
             d = ast.literal_eval(detail_str)
-            # 只顯示金額大於 0 的人
             return ", ".join([f"{k}: ${v}" for k, v in d.items() if v > 0])
         except:
             return detail_str
 
-    # 建立顯示用 Dataframe
     view_df = df.copy()
     view_df["幫誰付 (分攤明細)"] = view_df["分攤明細"].apply(format_detail)
     
