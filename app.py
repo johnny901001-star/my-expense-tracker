@@ -5,13 +5,27 @@ import datetime
 import ast
 
 # 1. 網頁基本設定
-st.set_page_config(page_title="雲端進階記帳系統 V4", layout="wide")
+st.set_page_config(page_title="雲端進階記帳系統 V5", layout="wide")
 
-# 自定義 CSS：優化輸入框高度與對齊
+# --- 進階 CSS 優化：強制排版緊湊、手機版維持一左一右 ---
 st.markdown("""
     <style>
-    .stCheckbox { margin-top: 15px; }
-    .stTextInput { margin-top: 0px; }
+    /* 縮減所有元件的上下間距 */
+    .block-container { padding-top: 1rem !important; padding-bottom: 0rem !important; }
+    .stForm { padding: 10px !important; }
+    
+    /* 強制讓小螢幕的 Column 不要斷行（維持一左一右） */
+    [data-testid="column"] {
+        min-width: 120px !important; 
+        flex: 1 1 45% !important;
+    }
+    
+    /* 縮減 Checkbox 與 Input 的間隙 */
+    .stCheckbox { margin-bottom: -15px !important; }
+    hr { margin: 0.5rem 0 !important; }
+    
+    /* 讓表單內的文字更緊湊 */
+    p, label { margin-bottom: 2px !important; font-size: 14px !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -32,7 +46,7 @@ def load_full_data():
 
 df = load_full_data()
 
-# 3. 初始化狀態
+# 3. 初始化成員清單
 if 'members' not in st.session_state:
     st.session_state.members = ["weiche", "Michael", "Ivy", "Wendy", "Ben", "Xuan", "Kaiwen", "Daniel"]
 
@@ -45,37 +59,38 @@ with st.sidebar:
         st.session_state.members = [m.strip() for m in member_str.split(",") if m.strip()]
         st.rerun()
 
-# 4. 新增支出功能 (改進排版與邏輯)
+# 4. 新增支出功能 (使用 clear_on_submit 確保提交後清空)
 st.subheader("➕ 新增支出")
-with st.form("expense_form"):
-    col_item, col_payer, col_amt = st.columns([2, 1, 1])
+with st.form("expense_form", clear_on_submit=True):
+    col_item, col_payer, col_amt = st.columns([1.5, 1, 1])
     with col_item:
-        item_name = st.text_input("品名", placeholder="例如：晚餐、機票...")
+        item_name = st.text_input("品名", placeholder="品名")
     with col_payer:
-        payer = st.selectbox("誰付的錢？", members)
+        payer = st.selectbox("誰付的", members)
     with col_amt:
-        total_amount = st.number_input("支出總金額", min_value=0.0, step=1.0, format="%.2f")
+        total_amount = st.number_input("總金額", min_value=0.0, step=1.0, format="%.1f")
     
-    st.write("📝 **分攤設定** (勾選=參與平分 / 填寫數字=指定金額)")
+    st.write("📝 **分攤設定** (勾選=平分 / 填數字=指定)")
     
-    # 建立分攤輸入區 (左右排版)
+    # 建立分攤輸入區 (左右並排，且手機版不輕易斷行)
     check_states = {}
     manual_values = {}
     
-    # 每行顯示兩個成員，以維持左右排版的空間
-    outer_cols = st.columns(2)
-    for i, m in enumerate(members):
-        with outer_cols[i % 2]:
-            st.markdown(f"**👤 {m}**")
-            # 這裡使用內部 columns 達成一左一右
-            c1, c2 = st.columns([1, 2])
-            with c1:
-                check_states[m] = st.checkbox("平分", key=f"check_{m}")
-            with c2:
-                manual_values[m] = st.text_input("指定金額", key=f"val_{m}", placeholder="0.0", label_visibility="collapsed")
-            st.markdown("---")
+    # 每兩個成員一組 row
+    for i in range(0, len(members), 2):
+        row_members = members[i:i+2]
+        cols = st.columns(2)
+        for idx, m in enumerate(row_members):
+            with cols[idx]:
+                # 內部再分兩欄，左邊勾選，右邊輸入金額
+                c1, c2 = st.columns([1, 2.5])
+                with c1:
+                    check_states[m] = st.checkbox("平分", key=f"check_{m}")
+                with c2:
+                    manual_values[m] = st.text_input(f"{m}", key=f"val_{m}", placeholder="指定$", label_visibility="collapsed")
+        st.markdown("---")
 
-    submit_button = st.form_submit_button("✅ 提交紀錄至雲端", use_container_width=True)
+    submit_button = st.form_submit_button("✅ 提交紀錄並清空", use_container_width=True)
     
     if submit_button:
         final_shares = {m: 0.0 for m in members}
@@ -83,7 +98,7 @@ with st.form("expense_form"):
         manual_members = []
         split_members = [m for m, checked in check_states.items() if checked]
         
-        # 1. 處理手動輸入
+        # 1. 處理手動輸入金額
         for m, val in manual_values.items():
             if val.strip():
                 try:
@@ -92,28 +107,28 @@ with st.form("expense_form"):
                     total_manual += amt
                     manual_members.append(m)
                 except ValueError:
-                    st.error(f"❌ {m} 的金額格式錯誤")
+                    st.error(f"❌ {m} 金額錯誤")
                     st.stop()
 
-        # 2. 處理平分
+        # 2. 處理平分剩餘金額
         remaining_amt = total_amount - total_manual
         if not split_members and not manual_members:
+            # 都沒勾也沒填 -> 全員平分
             avg = total_amount / len(members)
-            final_shares = {m: round(avg, 2) for m in members}
+            final_shares = {m: round(avg, 1) for m in members}
         elif split_members:
-            if remaining_amt < -0.01:
-                st.error(f"❌ 指定金額總和 (${total_manual}) 超過總金額 (${total_amount})")
+            if remaining_amt < -0.05:
+                st.error(f"❌ 分攤總額已超過總金額！")
                 st.stop()
-            avg = remaining_amt / len(split_members)
+            avg = max(0, remaining_amt / len(split_members))
             for m in split_members:
-                final_shares[m] += round(avg, 2)
+                final_shares[m] += round(avg, 1)
         
-        # 3. 驗證總額
-        sum_shares = sum(final_shares.values())
-        if abs(sum_shares - total_amount) > 0.5:
-            st.error(f"❌ 分攤金額總計 (${sum_shares:.2f}) 與支出 (${total_amount:.2f}) 不符！")
-        elif not item_name:
+        # 3. 最終校驗與寫入
+        if not item_name:
             st.error("❌ 請輸入品名")
+        elif abs(sum(final_shares.values()) - total_amount) > 1.0:
+            st.error(f"❌ 分攤總和與總金額不符")
         else:
             fresh_df = load_full_data()
             new_row = pd.DataFrame([{
@@ -125,22 +140,20 @@ with st.form("expense_form"):
             }])
             updated_df = pd.concat([fresh_df, new_row], ignore_index=True)
             conn.update(worksheet="Log", data=updated_df)
-            st.success(f"🎉 儲存成功！")
-            st.rerun()
+            st.toast(f"🎉 儲存成功！")
+            st.rerun() # 強制刷新頁面，確保 clear_on_submit 徹底生效
 
-# 5. 📜 支出明細與詳細分攤 (新增功能)
-st.divider()
+# 5. 📜 歷史明細與詳細分攤
 st.subheader("📜 支出詳細清單")
 if not df.empty:
     def format_detail(detail_str):
         try:
             d = ast.literal_eval(detail_str)
-            # 只顯示金額大於 0 的人
-            return ", ".join([f"{k}: ${v}" for k, v in d.items() if v > 0])
+            # 格式： 人名($錢)
+            return ", ".join([f"{k}(${v})" for k, v in d.items() if v > 0])
         except:
             return detail_str
 
-    # 建立顯示用 Dataframe
     view_df = df.copy()
     view_df["幫誰付 (分攤明細)"] = view_df["分攤明細"].apply(format_detail)
     
@@ -151,8 +164,8 @@ if not df.empty:
     )
 
     with st.expander("🗑️ 刪除紀錄"):
-        del_opt = [f"{i} | {row['日期']} | {row['品名']} (${row['總金額']})" for i, row in df.iterrows()]
-        target = st.selectbox("選擇要刪除的項目：", options=del_opt)
+        del_opt = [f"{i} | {row['品名']} (${row['總金額']})" for i, row in df.iterrows()]
+        target = st.selectbox("選擇要刪除的項目", options=del_opt)
         if st.button("確認刪除", type="primary"):
             idx = int(target.split(" | ")[0])
             updated_df = df.drop(idx).reset_index(drop=True)
@@ -178,9 +191,9 @@ if not df.empty:
         net = spent[m] - paid[m]
         status_data.append({
             "成員": m, 
-            "代墊總計": f"${paid[m]:.1f}", 
-            "消費總計": f"${spent[m]:.1f}", 
-            "目前狀態": f"🔴 欠 ${net:.1f}" if net > 0.1 else (f"🟢 應收 ${abs(net):.1f}" if net < -0.1 else "⚪ 已清算"),
+            "代墊": f"${paid[m]:.0f}", 
+            "消費": f"${spent[m]:.0f}", 
+            "狀態": f"🔴 欠{net:.0f}" if net > 0.1 else (f"🟢 收{abs(net):.0f}" if net < -0.1 else "⚪ 清"),
             "net": net
         })
     st.table(pd.DataFrame(status_data).drop(columns=["net"]))
@@ -191,8 +204,7 @@ if not df.empty:
         i, j = 0, 0
         while i < len(debtors) and j < len(creditors):
             transfer = min(debtors[i][1], creditors[j][1])
-            st.success(f"💸 **{debtors[i][0]}** ➜ 給 **{creditors[j][0]}**： **${transfer:.1f}**")
+            st.success(f"💸 **{debtors[i][0]}** ➔ 給 **{creditors[j][0]}**： **${transfer:.0f}**")
             debtors[i][1] -= transfer; creditors[j][1] -= transfer
             if debtors[i][1] < 0.1: i += 1
             if creditors[j][1] < 0.1: j += 1
-
