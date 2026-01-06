@@ -13,19 +13,16 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 
 # --- 核心修正：強制清除快取並重新讀取 ---
 def load_full_data():
-    # 強制清除 Streamlit 的所有暫存快取
     st.cache_data.clear()
     try:
-        # ttl=0 是絕對必要的
         data = conn.read(worksheet="Log", ttl=0)
-        # 移除全空行
         data = data.dropna(how='all')
-        # 強制修剪欄位名稱的空格
         data.columns = [str(c).strip() for c in data.columns]
         return data
     except Exception as e:
         st.error(f"連線或讀取失敗: {e}")
-        return pd.DataFrame(columns=["日期", "付款人", "總金額", "分攤明細"])
+        # 這裡增加了 "品名" 預設欄位
+        return pd.DataFrame(columns=["日期", "品名", "付款人", "總金額", "分攤明細"])
 
 df = load_full_data()
 
@@ -45,10 +42,13 @@ members = st.session_state.members
 # 4. 新增支出功能
 st.subheader("➕ 新增支出 (同步雲端)")
 with st.form("expense_form", clear_on_submit=True):
-    col_a, col_b = st.columns(2)
-    with col_a:
+    # 新增品名與付款人、金額排列
+    col_item, col_payer, col_amt = st.columns([2, 1, 1])
+    with col_item:
+        item_name = st.text_input("品名 (例：晚餐、計程車)", placeholder="請輸入支出項目...")
+    with col_payer:
         payer = st.selectbox("誰付的錢？", members)
-    with col_b:
+    with col_amt:
         total_amount = st.number_input("支出總金額", min_value=0.0, step=10.0)
     
     st.write("每人分攤金額 (留空代表平分):")
@@ -69,32 +69,27 @@ with st.form("expense_form", clear_on_submit=True):
         else:
             final_shares = {m: manual_entries.get(m, 0.0) for m in members}
 
-        # --- 解決覆蓋的關鍵：寫入前「最後一次」抓取雲端資料 ---
+        # 寫入前再次抓取
         fresh_df = load_full_data()
         
         new_row = pd.DataFrame([{
             "日期": datetime.date.today().strftime("%Y-%m-%d"),
+            "品名": item_name,  # 儲存品名
             "付款人": payer,
             "總金額": total_amount,
             "分攤明細": str(final_shares)
         }])
         
-        # 強制合併並重設索引
         updated_df = pd.concat([fresh_df, new_row], ignore_index=True)
-        
-        # 執行更新
         conn.update(worksheet="Log", data=updated_df)
-        st.success(f"🎉 已成功存入！目前雲端已有 {len(updated_df)} 筆資料。")
+        st.success(f"🎉 【{item_name}】已成功存入！")
         st.rerun()
 
 # 5. 結算報告
 st.divider()
 st.subheader("📊 收支統計狀態")
 
-# --- 偵錯區 (如果看不到資料，請看這裡) ---
-with st.expander("🛠️ 系統偵錯面板 (如果統計不動，請打開這裡)"):
-    st.write("1. 雲端偵測到的欄位名稱：", list(df.columns))
-    st.write("2. 雲端原始資料內容：")
+with st.expander("🛠️ 系統偵錯面板 (查看雲端原始資料)"):
     st.dataframe(df)
 
 if not df.empty:
@@ -102,16 +97,13 @@ if not df.empty:
     spent_summary = {m: 0.0 for m in members}
 
     for _, row in df.iterrows():
-        # 付款人累計 (強制轉字串並去空格)
         p = str(row.get("付款人", "")).strip()
         amt = row.get("總金額", 0)
         if p in paid_summary:
             paid_summary[p] += float(amt)
             
-        # 消費金額累計
         try:
             d_str = str(row.get("分攤明細", "{}")).strip()
-            # 使用 ast.literal_eval 安全解析字串字典
             detail = ast.literal_eval(d_str)
             for m, s in detail.items():
                 m_clean = str(m).strip()
@@ -120,7 +112,6 @@ if not df.empty:
         except:
             continue
 
-    # 顯示統計表
     status_list = []
     for m in members:
         net = spent_summary[m] - paid_summary[m]
@@ -135,7 +126,6 @@ if not df.empty:
     st.table(pd.DataFrame(status_list).drop(columns=["net"]))
 
     if st.button("🔍 計算誰該給誰錢"):
-        # 結算邏輯
         debtors = sorted([[m, spent_summary[m] - paid_summary[m]] for m in members if (spent_summary[m] - paid_summary[m]) > 0.1], key=lambda x: x[1], reverse=True)
         creditors = sorted([[m, abs(spent_summary[m] - paid_summary[m])] for m in members if (spent_summary[m] - paid_summary[m]) < -0.1], key=lambda x: x[1], reverse=True)
         
@@ -149,3 +139,21 @@ if not df.empty:
             if creditors[j][1] < 0.1: j += 1
 else:
     st.info("💡 雲端目前是空的，請先新增支出。")
+
+# 6. 底部小計算機
+st.divider()
+st.subheader("🧮 快速計算小工具")
+with st.container():
+    calc_col1, calc_col2 = st.columns([3, 1])
+    with calc_col1:
+        calc_input = st.text_input("輸入算式 (例如: 1250 + 480/2)", placeholder="請輸入數學算式...")
+    with calc_col2:
+        if calc_input:
+            try:
+                # 使用 eval 進行基礎運算，並加入簡易安全檢查
+                result = eval(calc_input, {"__builtins__": None}, {})
+                st.metric("計算結果", f"{result:.2f}")
+            except Exception:
+                st.error("算式錯誤")
+        else:
+            st.write("等待輸入...")
