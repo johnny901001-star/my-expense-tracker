@@ -5,7 +5,7 @@ import datetime
 import ast
 
 # 1. 網頁基本設定
-st.set_page_config(page_title="雲端進階記帳系統 V4", layout="wide")
+st.set_page_config(page_title="雲端進階記帳系統 V4 - 多旅程版", layout="wide")
 
 # 自定義 CSS
 st.markdown("""
@@ -20,35 +20,49 @@ st.title("💰 雲端進階記帳結算系統")
 # 2. 連接 Google Sheets
 conn = st.connection("gsheets", type=GSheetsConnection)
 
+# --- 旅程與成員管理 (Sidebar) ---
+with st.sidebar:
+    st.header("✈️ 旅程切換")
+    
+    # 讓使用者輸入旅程名稱，預設為 Log
+    trip_name = st.text_input("輸入當前旅程分頁名稱", value="Log", help="若輸入不存在的名稱，儲存第一筆帳務時會自動建立新分頁")
+    
+    # 檢查旅程是否切換，若切換則清除快取
+    if "current_trip" not in st.session_state or st.session_state.current_trip != trip_name:
+        st.session_state.current_trip = trip_name
+        st.cache_data.clear()
+
+    st.info(f"📍 目前記錄於：**{st.session_state.current_trip}**")
+    st.divider()
+
+    st.subheader("👥 成員設定")
+    if 'members' not in st.session_state:
+        st.session_state.members = ["weiche", "Michael", "Ivy", "Wendy", "Ben", "Xuan", "Kaiwen", "Daniel"]
+    
+    member_str = st.text_input("編輯成員 (用逗號隔開)", value=", ".join(st.session_state.members))
+    if st.button("更新成員名單"):
+        st.session_state.members = [m.strip() for m in member_str.split(",") if m.strip()]
+        st.rerun()
+
+members = st.session_state.members
+
+# 3. 資料讀取函數 (改為動態工作表)
 def load_full_data():
-    st.cache_data.clear()
     try:
-        data = conn.read(worksheet="Log", ttl=0)
+        # 使用當前選擇的旅程名稱讀取
+        data = conn.read(worksheet=st.session_state.current_trip, ttl=0)
         data = data.dropna(how='all')
         data.columns = [str(c).strip() for c in data.columns]
         return data
     except Exception:
+        # 如果分頁不存在，回傳空表
         return pd.DataFrame(columns=["日期", "品名", "付款人", "總金額", "分攤明細"])
 
 df = load_full_data()
 
-# 3. 初始化狀態
-if 'members' not in st.session_state:
-    st.session_state.members = ["weiche", "Michael", "Ivy", "Wendy", "Ben", "Xuan", "Kaiwen", "Daniel"]
+# 4. 新增支出功能
+st.subheader(f"➕ 新增支出 - 【{st.session_state.current_trip}】")
 
-members = st.session_state.members
-
-with st.sidebar:
-    st.subheader("👥 成員設定")
-    member_str = st.text_input("輸入成員名稱", value=", ".join(st.session_state.members))
-    if st.button("更新成員"):
-        st.session_state.members = [m.strip() for m in member_str.split(",") if m.strip()]
-        st.rerun()
-
-# 4. 新增支出功能 (已加入自動清空功能)
-st.subheader("➕ 新增支出")
-
-# 修改點 1：加入 clear_on_submit=True
 with st.form("expense_form", clear_on_submit=True):
     col_item, col_payer, col_amt = st.columns([2, 1, 1])
     with col_item:
@@ -82,7 +96,6 @@ with st.form("expense_form", clear_on_submit=True):
         manual_members = []
         split_members = [m for m, checked in check_states.items() if checked]
         
-        # 處理手動輸入
         for m, val in manual_values.items():
             if val.strip():
                 try:
@@ -94,7 +107,6 @@ with st.form("expense_form", clear_on_submit=True):
                     st.error(f"❌ {m} 的金額格式錯誤")
                     st.stop()
 
-        # 處理平分
         remaining_amt = total_amount - total_manual
         if not split_members and not manual_members:
             avg = total_amount / len(members)
@@ -107,14 +119,13 @@ with st.form("expense_form", clear_on_submit=True):
             for m in split_members:
                 final_shares[m] += round(avg, 2)
         
-        # 驗證總額
         sum_shares = sum(final_shares.values())
         if abs(sum_shares - total_amount) > 0.5:
             st.error(f"❌ 分攤金額總計 (${sum_shares:.2f}) 與支出 (${total_amount:.2f}) 不符！")
         elif not item_name:
             st.error("❌ 請輸入品名")
         else:
-            # 寫入雲端
+            # 寫入當前選擇的工作表
             fresh_df = load_full_data()
             new_row = pd.DataFrame([{
                 "日期": datetime.date.today().strftime("%Y-%m-%d"),
@@ -124,15 +135,16 @@ with st.form("expense_form", clear_on_submit=True):
                 "分攤明細": str(final_shares)
             }])
             updated_df = pd.concat([fresh_df, new_row], ignore_index=True)
-            conn.update(worksheet="Log", data=updated_df)
             
-            st.success(f"🎉 儲存成功！")
-            # 修改點 2：執行完畢後立即重啟，強制重置所有 widget 狀態與重新讀取數據
+            # 更新雲端 (若分頁不存在會自動建立)
+            conn.update(worksheet=st.session_state.current_trip, data=updated_df)
+            
+            st.success(f"🎉 儲存成功至旅程：{st.session_state.current_trip}！")
             st.rerun()
 
 # 5. 📜 支出明細與詳細分攤
 st.divider()
-st.subheader("📜 支出詳細清單")
+st.subheader(f"📜 {st.session_state.current_trip} - 支出詳細清單")
 if not df.empty:
     def format_detail(detail_str):
         try:
@@ -156,12 +168,12 @@ if not df.empty:
         if st.button("確認刪除", type="primary"):
             idx = int(target.split(" | ")[0])
             updated_df = df.drop(idx).reset_index(drop=True)
-            conn.update(worksheet="Log", data=updated_df)
+            conn.update(worksheet=st.session_state.current_trip, data=updated_df)
             st.rerun()
 
 # 6. 📊 結算報告
 st.divider()
-st.subheader("📊 結算報告")
+st.subheader(f"📊 {st.session_state.current_trip} - 結算報告")
 if not df.empty:
     paid = {m: 0.0 for m in members}; spent = {m: 0.0 for m in members}
     for _, row in df.iterrows():
@@ -195,4 +207,5 @@ if not df.empty:
             debtors[i][1] -= transfer; creditors[j][1] -= transfer
             if debtors[i][1] < 0.1: i += 1
             if creditors[j][1] < 0.1: j += 1
+
 
