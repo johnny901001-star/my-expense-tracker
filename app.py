@@ -5,7 +5,7 @@ import datetime
 import ast
 
 # 1. 網頁基本設定
-st.set_page_config(page_title="雲端進階記帳系統 V4 - 穩定建表版", layout="wide")
+st.set_page_config(page_title="雲端進階記帳系統 V4 - 旅程標籤版", layout="wide")
 
 st.markdown("""
     <style>
@@ -16,48 +16,16 @@ st.markdown("""
 
 st.title("💰 雲端進階記帳結算系統")
 
-# 2. 連接 Google Sheets
+# 2. 連接 Google Sheets (固定讀取 Log 分頁)
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- 核心邏輯改進：確保工作表存在 ---
-def ensure_worksheet_exists(sheet_name):
-    """
-    更穩定的建表邏輯：直接透過網址開啟試算表並建立分頁
-    """
-    try:
-        # 測試是否能讀取，若成功則直接回傳
-        conn.read(worksheet=sheet_name, ttl=0)
-    except Exception:
-        try:
-            # 從 secrets 取得試算表網址
-            # 如果你的 secrets 格式不同，請確保這裡指向正確的 URL
-            spreadsheet_url = st.secrets["connections"]["gsheets"]["spreadsheet"]
-            
-            # 使用底層 client 強行打開試算表
-            sh = conn.client.open_by_url(spreadsheet_url)
-            
-            # 建立新工作表
-            sh.add_worksheet(title=sheet_name, rows="1000", cols="10")
-            
-            # 寫入初始標題列，確保後續讀取不會報錯
-            df_init = pd.DataFrame(columns=["日期", "品名", "付款人", "總金額", "分攤明細"])
-            conn.update(worksheet=sheet_name, data=df_init)
-            st.toast(f"✅ 已成功建立新分頁：{sheet_name}")
-        except Exception as e:
-            st.error(f"❌ 自動建表失敗：{e}")
-            st.info("請檢查：1. Secrets 中的 spreadsheet 網址是否正確。 2. 帳號是否有編輯權限。")
-            st.stop()
-
-# --- 3. 旅程與成員管理 (Sidebar) ---
+# --- 旅程管理 (Sidebar) ---
 with st.sidebar:
     st.header("✈️ 旅程切換")
-    trip_name = st.text_input("輸入當前旅程分頁名稱", value="Log")
+    # 使用者在這邊輸入「台東」、「日本」等，會直接過濾資料
+    current_trip = st.text_input("輸入當前旅程名稱", value="預設旅程")
     
-    if "current_trip" not in st.session_state or st.session_state.current_trip != trip_name:
-        st.session_state.current_trip = trip_name
-        st.cache_data.clear()
-
-    st.info(f"📍 目前記錄於：**{st.session_state.current_trip}**")
+    st.info(f"📍 目前正在查看/記錄：**{current_trip}**")
     st.divider()
 
     st.subheader("👥 成員設定")
@@ -71,27 +39,39 @@ with st.sidebar:
 
 members = st.session_state.members
 
-# 4. 資料讀取函數
-def load_full_data():
+# 3. 資料讀取與過濾
+def load_and_filter_data(trip_label):
     try:
-        data = conn.read(worksheet=st.session_state.current_trip, ttl=0)
+        # 永遠讀取同一個 Worksheet "Log"
+        data = conn.read(worksheet="Log", ttl=0)
         data = data.dropna(how='all')
+        
+        # 如果是空表，建立正確欄位
         if data.empty:
-            return pd.DataFrame(columns=["日期", "品名", "付款人", "總金額", "分攤明細"])
+            return pd.DataFrame(columns=["日期", "旅程分類", "品名", "付款人", "總金額", "分攤明細"])
+        
         data.columns = [str(c).strip() for c in data.columns]
-        return data
+        
+        # 核心：根據旅程名稱過濾
+        if "旅程分類" in data.columns:
+            filtered_data = data[data["旅程分類"] == trip_label].copy()
+            return filtered_data
+        else:
+            # 如果雲端還沒有這一欄，就回傳空表
+            return pd.DataFrame(columns=["日期", "旅程分類", "品名", "付款人", "總金額", "分攤明細"])
     except Exception:
-        return pd.DataFrame(columns=["日期", "品名", "付款人", "總金額", "分攤明細"])
+        return pd.DataFrame(columns=["日期", "旅程分類", "品名", "付款人", "總金額", "分攤明細"])
 
-df = load_full_data()
+# 取得目前旅程的資料
+df = load_and_filter_data(current_trip)
 
-# 5. 新增支出功能
-st.subheader(f"➕ 新增支出 - 【{st.session_state.current_trip}】")
+# 4. 新增支出功能
+st.subheader(f"➕ 新增支出 - 【{current_trip}】")
 
 with st.form("expense_form", clear_on_submit=True):
     col_item, col_payer, col_amt = st.columns([2, 1, 1])
     with col_item:
-        item_name = st.text_input("品名", placeholder="例如：晚餐、機票...")
+        item_name = st.text_input("品名", placeholder="例如：晚餐...")
     with col_payer:
         payer = st.selectbox("誰付的錢？", members)
     with col_amt:
@@ -122,46 +102,40 @@ with st.form("expense_form", clear_on_submit=True):
                     final_shares[m] = amt
                     total_manual += amt
                 except ValueError:
-                    st.error(f"❌ {m} 的金額格式錯誤"); st.stop()
+                    st.error(f"❌ 金額格式錯誤"); st.stop()
 
         remaining_amt = total_amount - total_manual
         if not split_members and total_manual == 0:
             avg = total_amount / len(members)
             final_shares = {m: round(avg, 2) for m in members}
         elif split_members:
-            if remaining_amt < -0.01:
-                st.error(f"❌ 指定金額超過總額"); st.stop()
             avg = remaining_amt / len(split_members)
             for m in split_members: final_shares[m] += round(avg, 2)
         
         if not item_name:
             st.error("❌ 請輸入品名")
         else:
-            # 1. 確保分頁存在 (使用改進後的邏輯)
-            ensure_worksheet_exists(st.session_state.current_trip)
+            # 讀取「全部」資料準備合併 (不分旅程)
+            full_df = conn.read(worksheet="Log", ttl=0).dropna(how='all')
             
-            # 2. 準備資料
             new_row = pd.DataFrame([{
                 "日期": datetime.date.today().strftime("%Y-%m-%d"),
+                "旅程分類": current_trip, # 這裡會標記它是哪個旅程
                 "品名": item_name,
                 "付款人": payer,
                 "總金額": total_amount,
                 "分攤明細": str(final_shares)
             }])
             
-            # 3. 重新抓取最新資料並合併
-            current_df = load_full_data()
-            updated_df = pd.concat([current_df, new_row], ignore_index=True)
-            
-            # 4. 更新雲端
-            conn.update(worksheet=st.session_state.current_trip, data=updated_df)
-            st.success(f"🎉 儲存成功！")
+            updated_df = pd.concat([full_df, new_row], ignore_index=True)
+            conn.update(worksheet="Log", data=updated_df)
+            st.success(f"🎉 已加入旅程：{current_trip}")
             st.rerun()
 
-# --- 6. 支出明細與結算報告 (與之前邏輯相同) ---
+# 5. 📜 支出明細與結算 (只會顯示過濾後的資料)
 st.divider()
 if not df.empty:
-    st.subheader(f"📜 {st.session_state.current_trip} - 支出清單")
+    st.subheader(f"📜 {current_trip} - 支出清單")
     view_df = df.copy()
     def format_detail(s):
         try:
@@ -171,7 +145,7 @@ if not df.empty:
     view_df["幫誰付 (分攤明細)"] = view_df["分攤明細"].apply(format_detail)
     st.dataframe(view_df[["日期", "品名", "付款人", "總金額", "幫誰付 (分攤明細)"]], use_container_width=True, hide_index=True)
 
-    # 結算數據處理
+    # 結算數據處理 (只針對過濾後的 df)
     paid = {m: 0.0 for m in members}; spent = {m: 0.0 for m in members}
     for _, row in df.iterrows():
         p = str(row.get("付款人", "")).strip()
@@ -183,7 +157,7 @@ if not df.empty:
         except: continue
     
     st.divider()
-    st.subheader(f"📊 {st.session_state.current_trip} - 結算報告")
+    st.subheader(f"📊 {current_trip} - 結算報告")
     status_data = []
     for m in members:
         net = spent[m] - paid[m]
@@ -204,5 +178,6 @@ if not df.empty:
             debtors[i][1] -= transfer; creditors[j][1] -= transfer
             if debtors[i][1] < 0.1: i += 1
             if creditors[j][1] < 0.1: j += 1
-
+else:
+    st.info(f"旅程「{current_trip}」目前尚無資料，快去新增第一筆吧！")
 
