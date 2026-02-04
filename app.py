@@ -65,7 +65,7 @@ def load_and_filter_data(trip_label):
 # 取得目前旅程的資料
 df = load_and_filter_data(current_trip)
 
-# 4. 新增支出功能
+# 4. 新增支出功能 (含功能 2 & 3：輸入驗證)
 st.subheader(f"➕ 新增支出 - 【{current_trip}】")
 
 with st.form("expense_form", clear_on_submit=True):
@@ -91,6 +91,14 @@ with st.form("expense_form", clear_on_submit=True):
             st.markdown("---")
 
     if st.form_submit_button("✅ 提交紀錄至雲端", use_container_width=True):
+        # 功能 2：驗證品名與金額是否填寫
+        if not item_name.strip():
+            st.error("❌ 請輸入品名！")
+            st.stop()
+        if total_amount <= 0:
+            st.error("❌ 支出總金額必須大於 0！")
+            st.stop()
+
         final_shares = {m: 0.0 for m in members}
         total_manual = 0.0
         split_members = [m for m, checked in check_states.items() if checked]
@@ -102,37 +110,44 @@ with st.form("expense_form", clear_on_submit=True):
                     final_shares[m] = amt
                     total_manual += amt
                 except ValueError:
-                    st.error(f"❌ 金額格式錯誤"); st.stop()
+                    st.error(f"❌ {m} 的金額格式錯誤"); st.stop()
 
         remaining_amt = total_amount - total_manual
+        
         if not split_members and total_manual == 0:
             avg = total_amount / len(members)
             final_shares = {m: round(avg, 2) for m in members}
         elif split_members:
+            if remaining_amt < -0.01: # 功能 3 的一部分：手動輸入已超過總額
+                st.error(f"❌ 指定金額總和 (${total_manual}) 已超過支出總額 (${total_amount})！")
+                st.stop()
             avg = remaining_amt / len(split_members)
             for m in split_members: final_shares[m] += round(avg, 2)
         
-        if not item_name:
-            st.error("❌ 請輸入品名")
-        else:
-            # 讀取「全部」資料準備合併 (不分旅程)
-            full_df = conn.read(worksheet="Log", ttl=0).dropna(how='all')
-            
-            new_row = pd.DataFrame([{
-                "日期": datetime.date.today().strftime("%Y-%m-%d"),
-                "旅程分類": current_trip, # 這裡會標記它是哪個旅程
-                "品名": item_name,
-                "付款人": payer,
-                "總金額": total_amount,
-                "分攤明細": str(final_shares)
-            }])
-            
-            updated_df = pd.concat([full_df, new_row], ignore_index=True)
-            conn.update(worksheet="Log", data=updated_df)
-            st.success(f"🎉 已加入旅程：{current_trip}")
-            st.rerun()
+        # 功能 3：驗證分帳總額是否等於總金額
+        sum_shares = sum(final_shares.values())
+        if abs(sum_shares - total_amount) > 0.1:
+            st.error(f"❌ 分攤金額總計 (${sum_shares:.2f}) 與支出總額 (${total_amount:.2f}) 不符，請檢查分攤設定！")
+            st.stop()
 
-# 5. 📜 支出明細與結算 (只會顯示過濾後的資料)
+        # 讀取「全部」資料準備合併 (不分旅程)
+        full_df = conn.read(worksheet="Log", ttl=0).dropna(how='all')
+        
+        new_row = pd.DataFrame([{
+            "日期": datetime.date.today().strftime("%Y-%m-%d"),
+            "旅程分類": current_trip,
+            "品名": item_name,
+            "付款人": payer,
+            "總金額": total_amount,
+            "分攤明細": str(final_shares)
+        }])
+        
+        updated_df = pd.concat([full_df, new_row], ignore_index=True)
+        conn.update(worksheet="Log", data=updated_df)
+        st.success(f"🎉 已加入旅程：{current_trip}")
+        st.rerun()
+
+# 5. 📜 支出明細與結算 (含功能 1：刪除支出內容)
 st.divider()
 if not df.empty:
     st.subheader(f"📜 {current_trip} - 支出清單")
@@ -144,6 +159,27 @@ if not df.empty:
         except: return s
     view_df["幫誰付 (分攤明細)"] = view_df["分攤明細"].apply(format_detail)
     st.dataframe(view_df[["日期", "品名", "付款人", "總金額", "幫誰付 (分攤明細)"]], use_container_width=True, hide_index=True)
+
+    # --- 功能 1：刪除支出功能 ---
+    with st.expander("🗑️ 刪除支出紀錄"):
+        full_data_for_del = conn.read(worksheet="Log", ttl=0).dropna(how='all')
+        # 僅列出目前旅程的選項供選擇
+        trip_options = full_data_for_del[full_data_for_del["旅程分類"] == current_trip]
+        
+        if not trip_options.empty:
+            del_list = [f"{idx} | {row['日期']} | {row['品名']} (${row['總金額']})" for idx, row in trip_options.iterrows()]
+            target_del = st.selectbox("選擇要刪除的項目：", options=del_list)
+            
+            if st.button("🔴 確認刪除此筆紀錄", type="primary"):
+                target_idx = int(target_del.split(" | ")[0])
+                # 從原始總表中刪除該索引
+                final_df = full_data_for_del.drop(target_idx).reset_index(drop=True)
+                conn.update(worksheet="Log", data=final_df)
+                st.success("✅ 紀錄已成功刪除！")
+                st.rerun()
+        else:
+            st.write("此旅程尚無紀錄可刪除。")
+    # ---------------------------
 
     # 結算數據處理 (只針對過濾後的 df)
     paid = {m: 0.0 for m in members}; spent = {m: 0.0 for m in members}
